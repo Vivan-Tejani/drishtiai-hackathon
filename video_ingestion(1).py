@@ -28,6 +28,50 @@ def validate_video(video_path: Path) -> bool:
     return ret
 
 
+def _compute_downscale_target(
+    src_w: int, src_h: int, max_w: int, max_h: int
+) -> Tuple[int, int]:
+    """
+    Compute a downscale-only target size that preserves aspect ratio.
+
+    Only shrinks — never enlarges. If the source already fits within
+    (max_w, max_h) on both dimensions, returns the source size unchanged.
+    Otherwise scales down uniformly (same factor on both axes) so the
+    frame fits within the max bounds without stretching/warping it.
+    """
+    if src_w <= max_w and src_h <= max_h:
+        return src_w, src_h  # already small enough — leave untouched
+
+    scale = min(max_w / src_w, max_h / src_h)  # uniform factor, preserves aspect ratio
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
+    return new_w, new_h
+
+
+def _resize_frame(
+    frame: np.ndarray, max_w: int, max_h: int
+) -> np.ndarray:
+    """
+    Downscale a frame only if it exceeds (max_w, max_h), preserving aspect
+    ratio (no warping) and without cropping (no content is cut off — the
+    whole original field of view is kept, just at a smaller pixel size).
+
+    Uses INTER_AREA interpolation, which is the standard OpenCV choice for
+    shrinking images: it averages pixel blocks into each output pixel,
+    giving a clean, well-anti-aliased result rather than the blurring or
+    aliasing artifacts you get from naively using INTER_LINEAR/INTER_CUBIC
+    (those are designed for enlarging, not shrinking).
+    """
+    src_h, src_w = frame.shape[:2]
+    new_w, new_h = _compute_downscale_target(src_w, src_h, max_w, max_h)
+
+    if (new_w, new_h) == (src_w, src_h):
+        return frame  # already within bounds — no resize needed, avoids
+                       # any unnecessary quality loss or wasted compute
+
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
 def sample_frames(
     video_path: Path,
     target_fps: int = None,
@@ -56,6 +100,21 @@ def sample_frames(
 
     - Logging + config: kept centralized settings/logger usage instead of
       hardcoded module-level constants.
+
+    - Resizing: CONDITIONAL downscale-only, aspect-ratio-preserving resize.
+      Previously every frame was force-resized to a fixed
+      (RESOLUTION_WIDTH, RESOLUTION_HEIGHT), which would WARP the image if
+      the source aspect ratio differed (e.g. a 4:3 camera squeezed into a
+      16:9 target) and would actually UPSCALE (adding no real detail, only
+      wasting compute) if the source was already smaller than the target.
+      Now: if the source already fits within settings.RESOLUTION_WIDTH x
+      RESOLUTION_HEIGHT, it is left completely untouched. Otherwise it is
+      scaled down by a single uniform factor (same on both axes) so the
+      full original field of view is preserved with no cropping and no
+      distortion — just a smaller version of the same image. Uses
+      INTER_AREA interpolation, OpenCV's recommended method for shrinking
+      images, which avoids the blur/aliasing artifacts of interpolation
+      methods meant for enlarging.
     """
     target_fps = target_fps or settings.TARGET_FPS
     video_path = Path(video_path)
@@ -112,7 +171,7 @@ def sample_frames(
 
         consecutive_failures = 0
         timestamp_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-        frame = cv2.resize(frame, (settings.RESOLUTION_WIDTH, settings.RESOLUTION_HEIGHT))
+        frame = _resize_frame(frame, settings.RESOLUTION_WIDTH, settings.RESOLUTION_HEIGHT)
 
         yield (timestamp_sec, frame)
         yielded += 1
