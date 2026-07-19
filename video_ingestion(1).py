@@ -3,6 +3,9 @@ from typing import Generator, List, Tuple
 
 import cv2
 import numpy as np
+import shutil
+import subprocess
+import tempfile
 
 from settings import settings
 from logger import get_logger
@@ -26,6 +29,66 @@ def validate_video(video_path: Path) -> bool:
     ret, _ = cap.read()
     cap.release()
     return ret
+
+def _ensure_opencv_readable(video_path: Path) -> Path:
+    """
+    Try to open the video directly with OpenCV first. If that fails
+    (unsupported codec/container — common with cheaper CCTV/DVR exports),
+    fall back to re-encoding it via FFmpeg into a standard H.264/mp4 file,
+    then return the path to THAT file instead.
+
+    Returns the path that should actually be opened by cv2.VideoCapture —
+    either the original path (if it already works) or a converted temp copy.
+    """
+    if validate_video(video_path):
+        return video_path  # OpenCV can already read it directly — no conversion needed
+
+    logger.warning(
+        f"OpenCV cannot open {video_path.name} directly — "
+        f"attempting FFmpeg fallback conversion"
+    )
+
+    if shutil.which("ffmpeg") is None:
+        raise IngestionError(
+            f"Cannot open {video_path.name} with OpenCV, and FFmpeg is not "
+            f"installed to attempt a fallback conversion. Install ffmpeg "
+            f"(e.g. 'apt install ffmpeg') or pre-convert the file manually."
+        )
+
+    tmp_dir = Path(tempfile.gettempdir())
+    converted_path = tmp_dir / f"{video_path.stem}_converted.mp4"
+
+    cmd = [
+        "ffmpeg", "-y",              # -y: overwrite temp file if it already exists
+        "-i", str(video_path),
+        "-c:v", "libx264",           # standard, widely-supported codec
+        "-pix_fmt", "yuv420p",       # ensures broad player/decoder compatibility
+        "-an",                        # drop audio — irrelevant for this pipeline,
+                                       # smaller/faster output
+        str(converted_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=1800  # 30 min safety cap
+        )
+    except subprocess.TimeoutExpired:
+        raise IngestionError(f"FFmpeg conversion timed out for {video_path.name}")
+
+    if result.returncode != 0:
+        raise IngestionError(
+            f"FFmpeg conversion failed for {video_path.name}: "
+            f"{result.stderr[-500:]}"  # last 500 chars — usually the actual error
+        )
+
+    if not validate_video(converted_path):
+        raise IngestionError(
+            f"FFmpeg conversion produced a file that OpenCV still cannot open: "
+            f"{converted_path}"
+        )
+
+    logger.info(f"FFmpeg fallback succeeded — using converted file: {converted_path}")
+    return converted_path
 
 
 def sample_frames(
@@ -62,6 +125,10 @@ def sample_frames(
 
     if not video_path.exists():
         raise IngestionError(f"Video not found: {video_path}")
+
+    video_path = _ensure_opencv_readable(video_path)  # FFmpeg fallback if needed
+
+    cap = cv2.VideoCapture(str(video_path))
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
