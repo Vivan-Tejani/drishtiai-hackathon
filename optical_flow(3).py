@@ -47,7 +47,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from preprocessing import PreprocessedFrame, MotionROI
+from preprocessing import PreprocessedFrame, MotionROI #type:ignore
 
 
 # ==============================================================================
