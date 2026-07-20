@@ -79,6 +79,12 @@ class PreprocessingConfig:
     mog2_learning_rate: float = 0.01
     mog2_shadow_value: int = 127              # OpenCV default
 
+    # --- Noise reduction ------------------------------------------------------
+    gaussian_blur_kernel: int = 5             # must be odd; blur applied pre-MOG2
+                                               # to suppress sensor/compression
+                                               # noise before it reaches the
+                                               # background model
+
     # --- Mask cleaning -------------------------------------------------------
     morph_kernel_size: int = 3                # ellipse kernel
     morph_open_iter: int = 1
@@ -306,6 +312,18 @@ class PreprocessingPipeline:
 
         # Grayscale version for MOG2 (must be single channel)
         gray = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2GRAY)
+
+        # Suppress sensor/compression noise BEFORE it reaches MOG2's per-pixel
+        # background model. Morphological opening (later, on the mask) only
+        # removes isolated single-pixel noise -- it can't undo MOG2 already
+        # misreading spatially-correlated noise (e.g. H.264 macroblock
+        # flicker) as real foreground if that noise clusters into a blob
+        # larger than the morphology kernel. Blurring here reduces how often
+        # that happens in the first place.
+        k = self.cfg.gaussian_blur_kernel
+        if k % 2 == 0:
+            k += 1  # kernel size must be odd
+        gray = cv2.GaussianBlur(gray, (k, k), 0)
 
         # ------------------------------------------------------------------
         # 3. MOG2 background subtraction + shadow suppression
