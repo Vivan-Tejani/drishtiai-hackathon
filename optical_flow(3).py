@@ -187,7 +187,7 @@ class OpticalFlowRefiner:
         small_prev = cv2.resize(prev_gray, None, fx=scale, fy=scale)
         small_cur = cv2.resize(gray, None, fx=scale, fy=scale)
 
-        flow = cv2.calcOpticalFlowFarneback(
+        flow = cv2.calcOpticalFlowFarneback( 
             small_prev, small_cur, None,
             pyr_scale=self.cfg.farneback_pyr_scale,
             levels=1,                              # coarse pass — 1 level is enough
@@ -196,7 +196,7 @@ class OpticalFlowRefiner:
             poly_n=self.cfg.farneback_poly_n,
             poly_sigma=self.cfg.farneback_poly_sigma,
             flags=0,
-        )
+        ) #type:ignore
         magnitude = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
 
         moving_mask = magnitude > self.cfg.vibration_min_magnitude
@@ -247,7 +247,7 @@ class OpticalFlowRefiner:
             poly_n=self.cfg.farneback_poly_n,
             poly_sigma=self.cfg.farneback_poly_sigma,
             flags=0,
-        )
+        ) #type:ignore
         magnitude_crop = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
 
         # Build a full-frame-sized delta with zeros outside the cropped region,

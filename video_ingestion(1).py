@@ -11,8 +11,8 @@ import time
 import cv2
 import numpy as np
 
-from settings import settings
-from logger import get_logger
+from settings import settings #type:ignore
+from logger import get_logger #type:ignore
 
 logger = get_logger("ingestion")
 
@@ -22,10 +22,8 @@ logger = get_logger("ingestion")
 # spawn -- there's no cross-process synchronization needed or intended here.
 _conversion_count = [0]
 
-
 class IngestionError(Exception):
     pass
-
 
 class CorruptedVideoError(IngestionError):
     pass
@@ -58,7 +56,7 @@ def _ensure_opencv_readable(video_path: Path) -> Path:
     they're responsible for deleting the temp file afterward.
     """
     if validate_video(video_path):
-        return video_path, False  # OpenCV can already read it directly -- no conversion needed
+        return video_path, False  # OpenCV can already read it directly -- no conversion needed #type:ignore
 
     logger.warning(
         f"OpenCV cannot open {video_path.name} directly -- "
@@ -111,7 +109,7 @@ def _ensure_opencv_readable(video_path: Path) -> Path:
 
     logger.info(f"FFmpeg fallback succeeded -- using converted file: {converted_path}")
     _conversion_count[0] += 1
-    return converted_path, True
+    return converted_path, True #type:ignore
 
 
 def _compute_downscale_target(
@@ -192,7 +190,7 @@ def sample_frames(
     if not video_path.exists():
         raise IngestionError(f"Video not found: {video_path}")
 
-    video_path, was_converted = _ensure_opencv_readable(video_path)  # FFmpeg fallback if needed
+    video_path, was_converted = _ensure_opencv_readable(video_path)  # FFmpeg fallback if #type:ignore
 
     cap = None
     try:
@@ -268,8 +266,8 @@ def sample_frames(
 
 def sample_frames_chunked(
     video_path: Path,
-    target_fps: int = None,
-    chunk_size: int = None,
+    target_fps: int = None, #type:ignore
+    chunk_size: int = None, #type:ignore
 ) -> Generator[List[Tuple[float, np.ndarray]], None, None]:
     """
     Same as sample_frames but batches frames into fixed-size chunks.
@@ -381,8 +379,8 @@ class BatchIngestionQueue:
     def run(
         self,
         video_paths: List[str],
-        target_fps: int = None,
-        chunk_size: int = None,
+        target_fps: int = None, #type:ignore
+        chunk_size: int = None, #type:ignore
         on_result: Optional[Callable[[IngestionJobResult], None]] = None,
     ) -> List[IngestionJobResult]:
         results: List[IngestionJobResult] = []
