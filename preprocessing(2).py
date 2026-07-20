@@ -49,7 +49,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Generator, List, Optional, Tuple, Dict
 from collections import defaultdict, deque
@@ -57,7 +57,7 @@ from collections import defaultdict, deque
 # ------------------------------------------------------------------------------
 # Import your ingestion layer (assumes video_ingestion.py is on PYTHONPATH)
 # ------------------------------------------------------------------------------
-from video_ingestion import sample_frames, validate_video, IngestionError
+from ingestion import sample_frames, validate_video, IngestionError
 
 
 # ==============================================================================
@@ -241,9 +241,16 @@ class PreprocessingPipeline:
 
     def _reset_state(self) -> None:
         """Reset temporal state (call between videos)."""
-        self.heatmap: np.ndarray = np.zeros(
-            (self.cfg.height, self.cfg.width), dtype=np.float32
-        )
+        # BUG FIX: heatmap was hardcoded to (cfg.height, cfg.width), but
+        # ingestion's resize is downscale-ONLY -- a source video smaller than
+        # the configured cap (e.g. 640x480 when cfg is 1280x720) is left
+        # untouched, so the actual incoming frame size can be smaller than
+        # cfg.width/cfg.height. That mismatch crashed heatmap accumulation
+        # with a broadcast error the first time this ran against a non-
+        # matching real video. The heatmap is now allocated lazily, sized
+        # from the first real frame it actually sees, instead of assumed
+        # up front from config.
+        self.heatmap: Optional[np.ndarray] = None
         self._roi_candidates: Dict[int, MotionROI] = {}   # temp_id -> ROI
         self._next_temp_id: int = 0
         self._frame_counter: int = 0
@@ -263,15 +270,27 @@ class PreprocessingPipeline:
         target_fps: int = 2,
     ) -> Generator[PreprocessedFrame, None, None]:
         """
-        Generator wrapper around video_ingestion.sample_frames.
+        Generator wrapper around ingestion.sample_frames.
         Yields PreprocessedFrame objects with ROIs, heatmap, and enhanced frames.
+
+        BUG FIX: sample_frames() yields plain float seconds-elapsed
+        (by design -- see ingestion.py, this avoids the old datetime
+        anchor-date bug), but every timestamp field in this file
+        (MotionROI.timestamp, PreprocessedFrame.timestamp, the heatmap
+        decay math) is typed and used as `datetime`. Converting once here,
+        at the ingestion boundary, means the rest of the pipeline doesn't
+        need to change -- an arbitrary fixed anchor is fine since only
+        relative differences between timestamps are ever used (heatmap
+        decay dt, ROI persistence matching), never the absolute value.
         """
         if not validate_video(video_path):
             raise IngestionError(f"Video unreadable or corrupt: {video_path}")
 
         self._reset_state()
+        anchor = datetime.fromtimestamp(0)
 
-        for timestamp, frame in sample_frames(video_path, target_fps=target_fps):
+        for elapsed_seconds, frame in sample_frames(video_path, target_fps=target_fps):
+            timestamp = anchor + timedelta(seconds=elapsed_seconds)
             result = self.process_frame(frame, timestamp)
             self._frame_counter += 1
             yield result
@@ -425,8 +444,33 @@ class PreprocessingPipeline:
             )
             self._camera_health_warning_emitted = True
 
-        h, w = self.cfg.height, self.cfg.width
+        # BUG FIX: previously always used (cfg.height, cfg.width) here, same
+        # class of bug as the heatmap sizing issue -- on a downscaled video
+        # (e.g. source smaller than the configured cap, left untouched by
+        # ingestion's downscale-only resize), a rejected frame's placeholder
+        # arrays came back at the WRONG size relative to every other frame
+        # in the same stream. That's a silent correctness bug, not a crash:
+        # nothing here would raise, but any downstream code that assumes
+        # consistent shapes across the whole video (stacking frames,
+        # writing to a video file, concatenating masks) would break the
+        # moment a single frame got rejected on non-native-resolution
+        # footage. Now derives size from the real frame when we have one
+        # (the too_dark/too_bright cases -- the frame exists, it's just
+        # rejected on content) and only falls back to cfg dimensions for
+        # the genuine empty_frame case where there's nothing to measure.
+        if frame is not None:
+            h, w = frame.shape[:2]
+        else:
+            h, w = self.cfg.height, self.cfg.width
         empty = np.zeros((h, w, 3), dtype=np.uint8) if frame is None else frame
+        # Heatmap may still be None here if the very first frame of the
+        # video is rejected before _update_heatmap ever ran -- return a
+        # zeroed placeholder of the right size instead of crashing on
+        # None.copy().
+        heatmap_snapshot = (
+            self.heatmap.copy() if self.heatmap is not None
+            else np.zeros((h, w), dtype=np.float32)
+        )
         return PreprocessedFrame(
             timestamp=timestamp,
             original=empty,
@@ -435,7 +479,7 @@ class PreprocessingPipeline:
             fg_mask=np.zeros((h, w), dtype=np.uint8),
             rois=[],
             motion_score=0.0,
-            motion_heatmap=self.heatmap.copy(),
+            motion_heatmap=heatmap_snapshot,
             quality_passed=False,
             rejection_reason=reason,
         )
@@ -621,6 +665,20 @@ class PreprocessingPipeline:
         else:
             dt = 0.0  # first frame — no decay to apply yet
         self._last_heatmap_timestamp = timestamp
+
+        # Allocate on first real use, sized to match the actual incoming
+        # mask (not assumed from cfg.width/cfg.height -- ingestion's resize
+        # is downscale-only, so a source smaller than the configured cap is
+        # left at its native size, and a hardcoded heatmap size would
+        # mismatch and crash on the broadcast).
+        if self.heatmap is None:
+            self.heatmap = np.zeros(mask_bin.shape[:2], dtype=np.float32)
+        elif self.heatmap.shape != mask_bin.shape[:2]:
+            raise ValueError(
+                f"Frame size changed mid-video: heatmap is {self.heatmap.shape}, "
+                f"new mask is {mask_bin.shape[:2]}. Cannot continue accumulating "
+                f"a heatmap across inconsistent frame sizes."
+            )
 
         decay_factor = self.cfg.heatmap_decay_per_second ** dt
         self.heatmap *= decay_factor
