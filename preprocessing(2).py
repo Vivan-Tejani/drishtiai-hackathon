@@ -22,6 +22,10 @@ Fixes applied to baseline (v2.0):
   • FLAW #E  — Hardcoded thresholds; now exposed via dataclass config.
   • FLAW #F  — No motion intensity metric; now computed per-ROI.
   • FLAW #G  — No quality gate; now rejects all-black / all-white frames.
+  • FLAW #H  — ROI intensity averaged over the full bounding box, diluting
+               scores for non-rectangular blobs (hand, angled limb, etc.)
+               by including background pixels; now averaged only over the
+               actual contour shape.
 
 Usage:
     from video_ingestion import sample_frames
@@ -443,10 +447,24 @@ class PreprocessingPipeline:
             if aspect < self.cfg.min_roi_aspect or aspect > self.cfg.max_roi_aspect:
                 continue
 
-            # Intensity = mean pixel value inside the contour on the *raw* mask
-            # (before binarisation) so weak but real motion still scores > 0.
+            # Intensity = mean pixel value inside the CONTOUR shape (not the
+            # bounding box). BUG FIX: previously this averaged over the full
+            # bounding rectangle, which includes background pixels for any
+            # non-rectangular blob (a hand, torso, angled limb, etc.) --
+            # diluting intensity downward for shapes that don't fill their
+            # bbox, and making intensity not a fair comparison between a
+            # blob that's roughly rectangular vs one that isn't. We now
+            # build a contour-shaped mask and average only the pixels the
+            # contour actually covers, on the *raw* mask (before
+            # binarisation) so weak but real motion still scores > 0.
+            contour_mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(
+                contour_mask, [cnt - [x, y]], contourIdx=-1,
+                color=255, thickness=cv2.FILLED,
+            )
             mask_roi = mask[y:y+h, x:x+w]
-            intensity = float(np.mean(mask_roi))
+            contour_pixels = mask_roi[contour_mask > 0]
+            intensity = float(np.mean(contour_pixels)) if contour_pixels.size > 0 else 0.0
 
             rois.append(MotionROI(
                 x=x, y=y, w=w, h=h,
